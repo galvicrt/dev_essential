@@ -62,6 +62,7 @@ public:
 public:
     /**
      * Send an RPC message to the connected url
+     * HTTP response bodies are limited to 8 MiB.
      * @param[in] message Message to send
      * @param[out] result The result of the response
      * @throws jsonrpc::JsonRpcException in case of a connection error

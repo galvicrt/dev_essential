@@ -20,11 +20,13 @@ jsonrpc_generate_server_stub(${CMAKE_CURRENT_SOURCE_DIR}/test.json          #spe
                              )
 
 add_executable(pkg_rpc_test tester_pkg_rpc.cpp
+                            httplib_content_length_test.cpp
                             test.json
                             ${CMAKE_CURRENT_BINARY_DIR}/testclientstub.h
                             ${CMAKE_CURRENT_BINARY_DIR}/testserverstub.h)
 set_target_properties(pkg_rpc_test PROPERTIES FOLDER test/function/rpc)
-target_include_directories(pkg_rpc_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(pkg_rpc_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}
+                                                ${CMAKE_CURRENT_SOURCE_DIR}/../../../../extern/3rdparty/cpp-httplib)
 target_link_libraries(pkg_rpc_test PRIVATE GTest::gtest_main dev_essential::pkg_rpc
                                            $<$<BOOL:${QNXNTO}>:socket>)
 gtest_discover_tests(pkg_rpc_test)

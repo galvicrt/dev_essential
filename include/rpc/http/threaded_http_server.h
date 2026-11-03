@@ -38,6 +38,7 @@ public:
 
     /**
      * Starts listening and processing of requests.
+     * HTTP request bodies are limited to 8 MiB; invalid or larger bodies are rejected.
      * @param[in] strURL The URL, i.e. http://0.0.0.0:8000
      * @return Standard result
      */
