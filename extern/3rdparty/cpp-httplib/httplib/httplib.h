@@ -59,6 +59,8 @@ typedef int socket_t;
 #include <string>
 #include <sstream>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -395,15 +397,6 @@ inline const char* get_header_value(const MultiMap& map, const char* key, const 
     return def;
 }
 
-inline int get_header_value_int(const MultiMap& map, const char* key, int def)
-{
-    MultiMap::const_iterator it = map.find(key);
-    if (it != map.end()) {
-        return atoi(it->second.c_str());
-    }
-    return def;
-}
-
 inline bool read_headers(socket_t sock, MultiMap& headers)
 {
     const size_t BUFSIZ_HEADER = 2048;
@@ -434,15 +427,63 @@ inline bool read_headers(socket_t sock, MultiMap& headers)
     return true;
 }
 
+inline bool is_content_length(const std::string& header)
+{
+    const char* name = "content-length";
+    if (header.size() != strlen(name)) return false;
+    for (size_t i = 0; i < header.size(); ++i) {
+        char c = header[i];
+        if ('A' <= c && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != name[i]) return false;
+    }
+    return true;
+}
+
+inline bool get_content_length(const MultiMap& headers, size_t& len)
+{
+    // Bound both requests and responses.
+    const size_t max_content_length = 8 * 1024 * 1024;
+    len = 0;
+    bool found = false;
+    for (MultiMap::const_iterator it = headers.begin(); it != headers.end(); ++it) {
+        if (!is_content_length(it->first)) continue;
+        if (found) return false;
+        found = true;
+
+        const std::string& value = it->second;
+        size_t start = value.find_first_not_of(" \t");
+        size_t end = value.find_last_not_of(" \t");
+        if (start == std::string::npos) return false;
+        for (size_t i = start; i <= end; ++i) {
+            if (value[i] < '0' || value[i] > '9') return false;
+            size_t digit = static_cast<size_t>(value[i] - '0');
+            if (len > (max_content_length - digit) / 10) return false;
+            len = len * 10 + digit;
+        }
+    }
+    return true;
+}
+
 template <typename T>
 bool read_content(socket_t sock, T& x)
 {
-    int len = get_header_value_int(x.headers, "Content-Length", 0);
-    if (len) {
-        x.body.assign(len, 0);
-        if (!socket_read(sock, &x.body[0], x.body.size())) {
-            return false;
+    size_t len = 0;
+    if (!get_content_length(x.headers, len)) return false;
+
+    // Never allocate for bytes not yet received.
+    try {
+        if (len) x.body.clear();
+        char buffer[8192];
+        while (len) {
+            size_t count = len < sizeof(buffer) ? len : sizeof(buffer);
+            if (!socket_read(sock, buffer, count)) return false;
+            x.body.append(buffer, count);
+            len -= count;
         }
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
     }
     return true;
 }
@@ -453,7 +494,7 @@ inline void write_headers(socket_t sock, const T& res)
     socket_write(sock, "Connection: close\r\n");
 
     for (MultiMap::const_iterator x = res.headers.begin(); x != res.headers.end(); ++x) {
-        if (x->first != "Content-Type" && x->first != "Content-Length") {
+        if (x->first != "Content-Type" && !is_content_length(x->first)) {
             socket_printf(sock, "%s: %s\r\n", x->first.c_str(), x->second.c_str());
         }
     }
@@ -867,37 +908,41 @@ inline void Server::stop()
 
 inline void Server::process_request(socket_t sock)
 {
-    while (detail::wait_for_socket_readable(sock, 10000000))
-    {
-        Request req;
-        Response res;
+    try {
+        while (detail::wait_for_socket_readable(sock, 10000000))
+        {
+            Request req;
+            Response res;
 
-        if (!detail::read_request_line(sock, req) ||
-            !detail::read_headers(sock, req.headers)) {
-            break;
-        }
+            if (!detail::read_request_line(sock, req) ||
+                !detail::read_headers(sock, req.headers)) {
+                break;
+            }
 
-        if (req.method == "POST") {
             if (!detail::read_content(sock, req)) {
                 break;
             }
-            static std::string type = "application/x-www-form-urlencoded";
-            if (!req.get_header_value("Content-Type").compare(0, type.size(), type)) {
-                detail::parse_query_text(req.body, req.params);
+            if (req.method == "POST") {
+                static std::string type = "application/x-www-form-urlencoded";
+                if (!req.get_header_value("Content-Type").compare(0, type.size(), type)) {
+                    detail::parse_query_text(req.body, req.params);
+                }
             }
-        }
 
-        if (handle_request(req, res)) {
-            if (res.status == -1) {
-                res.status = 200;
+            if (handle_request(req, res)) {
+                if (res.status == -1) {
+                    res.status = 200;
+                }
+            } else {
+                res.status = 404;
             }
-        } else {
-            res.status = 404;
+
+            assert(res.status != -1);
+
+            detail::write_response(sock, req, res);
         }
-
-        assert(res.status != -1);
-
-        detail::write_response(sock, req, res);
+    } catch (...) {
+        // Keep a failed request from terminating a detached worker's process.
     }
 
     detail::close_socket(sock);
