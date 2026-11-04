@@ -427,22 +427,26 @@ inline bool read_headers(socket_t sock, MultiMap& headers)
     return true;
 }
 
+inline bool is_content_length(const std::string& header)
+{
+    const char* name = "content-length";
+    if (header.size() != strlen(name)) return false;
+    for (size_t i = 0; i < header.size(); ++i) {
+        char c = header[i];
+        if ('A' <= c && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != name[i]) return false;
+    }
+    return true;
+}
+
 inline bool get_content_length(const MultiMap& headers, size_t& len)
 {
     // Bound both requests and responses.
     const size_t max_content_length = 8 * 1024 * 1024;
-    const char* name = "content-length";
     len = 0;
     bool found = false;
     for (MultiMap::const_iterator it = headers.begin(); it != headers.end(); ++it) {
-        if (it->first.size() != strlen(name)) continue;
-        size_t i = 0;
-        for (; i < it->first.size(); ++i) {
-            char c = it->first[i];
-            if ('A' <= c && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-            if (c != name[i]) break;
-        }
-        if (i != it->first.size()) continue;
+        if (!is_content_length(it->first)) continue;
         if (found) return false;
         found = true;
 
@@ -450,7 +454,7 @@ inline bool get_content_length(const MultiMap& headers, size_t& len)
         size_t start = value.find_first_not_of(" \t");
         size_t end = value.find_last_not_of(" \t");
         if (start == std::string::npos) return false;
-        for (i = start; i <= end; ++i) {
+        for (size_t i = start; i <= end; ++i) {
             if (value[i] < '0' || value[i] > '9') return false;
             size_t digit = static_cast<size_t>(value[i] - '0');
             if (len > (max_content_length - digit) / 10) return false;
@@ -490,7 +494,7 @@ inline void write_headers(socket_t sock, const T& res)
     socket_write(sock, "Connection: close\r\n");
 
     for (MultiMap::const_iterator x = res.headers.begin(); x != res.headers.end(); ++x) {
-        if (x->first != "Content-Type" && x->first != "Content-Length") {
+        if (x->first != "Content-Type" && !is_content_length(x->first)) {
             socket_printf(sock, "%s: %s\r\n", x->first.c_str(), x->second.c_str());
         }
     }
@@ -915,10 +919,10 @@ inline void Server::process_request(socket_t sock)
                 break;
             }
 
+            if (!detail::read_content(sock, req)) {
+                break;
+            }
             if (req.method == "POST") {
-                if (!detail::read_content(sock, req)) {
-                    break;
-                }
                 static std::string type = "application/x-www-form-urlencoded";
                 if (!req.get_header_value("Content-Type").compare(0, type.size(), type)) {
                     detail::parse_query_text(req.body, req.params);

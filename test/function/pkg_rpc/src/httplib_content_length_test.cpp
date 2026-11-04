@@ -11,6 +11,7 @@
 
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 TEST(HttpContentLength, ChecksLengthsAndHeaderNames)
 {
@@ -41,12 +42,16 @@ public:
     bool called = false;
     bool fail = false;
     std::string body;
+    std::vector<std::string> bodies;
+    std::vector<std::string> urls;
 
     bool handle_request(const httplib::Request& request, httplib::Response& response) override
     {
         called = true;
         if (fail) throw std::runtime_error("handler failure");
         body = request.body;
+        bodies.push_back(request.body);
+        urls.push_back(request.url);
         response.body = "ok";
         return true;
     }
@@ -86,6 +91,71 @@ TEST(HttpContentLength, RejectsInvalidRequestsAndContinuesServing)
                   .find("200 OK"), std::string::npos);
     EXPECT_TRUE(server.called);
     EXPECT_EQ(server.body, "hello");
+}
+
+TEST(HttpContentLength, ValidatesBodiesForAllMethods)
+{
+    TestServer server;
+    for (const auto& method : {"GET", "HEAD", "PUT"}) {
+        for (const auto& header : {"Content-Length: -1", "content-length: 8388609",
+                                   "Content-Length: 1\r\ncontent-length: 2",
+                                   "Content-Length: 5"}) {
+            EXPECT_TRUE(process(server, std::string(method) + " / HTTP/1.0\r\n" + header + "\r\n\r\n").empty());
+            EXPECT_FALSE(server.called);
+        }
+    }
+
+    const std::string response = process(server,
+        "GET /first HTTP/1.0\r\ncontent-length: 5\r\n\r\nhello"
+        "POST /second HTTP/1.0\r\nContent-Length: 3\r\n\r\nbye");
+    EXPECT_NE(response.find("200 OK"), std::string::npos);
+    ASSERT_EQ(server.urls.size(), 2u);
+    EXPECT_EQ(server.urls[0], "/first");
+    EXPECT_EQ(server.urls[1], "/second");
+    ASSERT_EQ(server.bodies.size(), 2u);
+    EXPECT_EQ(server.bodies[0], "hello");
+    EXPECT_EQ(server.bodies[1], "bye");
+}
+
+TEST(HttpContentLength, WritesOnlyComputedLengthForRequestsAndResponses)
+{
+    for (bool response : {false, true}) {
+        int sockets[2];
+        ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+        httplib::Request request;
+        httplib::Response reply;
+        httplib::MultiMap headers = {{"Content-Length", "10"}, {"content-length", "11"},
+                                     {"CoNtEnT-LeNgTh", "12"},
+                                     {"X-Other", "first"}, {"X-Other", "second"}};
+        if (response) {
+            reply.status = 200;
+            reply.body = "hello";
+            reply.headers = headers;
+            httplib::detail::write_response(sockets[0], request, reply);
+        } else {
+            request.method = "POST";
+            request.url = "/";
+            request.body = "hello";
+            request.headers = headers;
+            httplib::detail::write_request(sockets[0], request);
+        }
+        shutdown(sockets[0], SHUT_WR);
+        std::string output;
+        char buffer[1024];
+        int count;
+        while ((count = recv(sockets[1], buffer, sizeof(buffer), 0)) > 0) {
+            output.append(buffer, count);
+        }
+        close(sockets[0]);
+        close(sockets[1]);
+        EXPECT_NE(output.find("Content-Length: 5\r\n"), std::string::npos);
+        EXPECT_EQ(output.find("Content-Length: 10\r\n"), std::string::npos);
+        EXPECT_EQ(output.find("content-length: 11\r\n"), std::string::npos);
+        EXPECT_EQ(output.find("CoNtEnT-LeNgTh: 12\r\n"), std::string::npos);
+        EXPECT_NE(output.find("X-Other: first\r\n"), std::string::npos);
+        EXPECT_NE(output.find("X-Other: second\r\n"), std::string::npos);
+        EXPECT_NE(output.find("\r\n\r\nhello"), std::string::npos);
+    }
 }
 
 TEST(HttpContentLength, ContainsWorkerExceptionsAndClosesConnection)
